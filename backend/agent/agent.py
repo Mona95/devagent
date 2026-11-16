@@ -1,24 +1,107 @@
+import json
 import os
-import re
-from groq import Groq
+
 from dotenv import load_dotenv
+from groq import Groq
+
 from agent.prompts import AGENT_SYSTEM_PROMPT
-from agent.tools.web_search import web_search
+from agent.tools.analyze_code import analyze_code
+from agent.tools.github_tool import github_repo
 from agent.tools.read_url import read_url
 from agent.tools.run_python import run_python
-from agent.tools.github_tool import github_repo
-from agent.tools.analyze_code import analyze_code
+from agent.tools.web_search import web_search
 
 load_dotenv()
 
-# Tool registry — maps tool names to functions
+# Tool registry: name -> function
 TOOLS = {
     "web_search": web_search,
     "read_url": read_url,
     "run_python": run_python,
     "github_repo": github_repo,
-    "analyze_code": analyze_code
+    "analyze_code": analyze_code,
 }
+
+# Tool schemas: what the model sees.
+# Parameter names must match the Python function arguments exactly.
+TOOL_SCHEMAS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "web_search",
+            "description": "Search the internet for current information. Returns top results with titles, snippets and links.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The search query"}
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_url",
+            "description": "Fetch a webpage and return its readable text (truncated to 3000 characters).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "Full URL starting with http(s)://"}
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "run_python",
+            "description": "Execute Python code and return stdout/stderr. Use print() to see values. 10 second timeout.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "Complete Python code to run"}
+                },
+                "required": ["code"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "github_repo",
+            "description": "Fetch info about a GitHub repository: description, stats, README and root files.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "repo": {"type": "string", "description": 'Repository as "owner/repo" or a GitHub URL'}
+                },
+                "required": ["repo"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "analyze_code",
+            "description": "Analyze a piece of code for security issues, performance problems, bugs or general quality.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {"type": "string", "description": "The code to analyze"},
+                    "analysis_type": {
+                        "type": "string",
+                        "enum": ["security", "performance", "bugs", "review", "general"],
+                        "description": "What kind of analysis to run",
+                    },
+                },
+                "required": ["code"],
+            },
+        },
+    },
+]
+
 
 class DevAgent:
     def __init__(self):
@@ -26,143 +109,95 @@ class DevAgent:
         self.model = "openai/gpt-oss-120b"
         self.max_iterations = 10
 
-    def parse_response(self, response: str) -> dict:
-        """
-        Parse the agent's response to extract:
-        - thought: the agent's reasoning
-        - tool: which tool to call (if any)
-        - input: the tool input
-        - final_answer: the final response (if done)
-        """
-        result = {
-            "thought": "",
-            "tool": None,
-            "input": None,
-            "final_answer": None
-        }
-
-        # Extract THOUGHT
-        thought_match = re.search(
-            r"THOUGHT:\s*(.+?)(?=TOOL:|FINAL_ANSWER:|$)",
-            response, re.DOTALL
-        )
-        if thought_match:
-            result["thought"] = thought_match.group(1).strip()
-
-        # Extract TOOL and INPUT
-        tool_match = re.search(r"TOOL:\s*(\w+)", response)
-        input_match = re.search(
-            r"INPUT:\s*(.+?)(?=THOUGHT:|TOOL:|FINAL_ANSWER:|$)",
-            response, re.DOTALL
-        )
-        if tool_match:
-            result["tool"] = tool_match.group(1).strip()
-        if input_match:
-            result["input"] = input_match.group(1).strip()
-
-        # Extract FINAL_ANSWER
-        answer_match = re.search(
-            r"FINAL_ANSWER:\s*(.+)$",
-            response, re.DOTALL
-        )
-        if answer_match:
-            result["final_answer"] = answer_match.group(1).strip()
-
-        return result
+    def execute_tool(self, name: str, raw_arguments: str) -> str:
+        """Run one tool call. Never raises: errors go back to the model as text."""
+        if name not in TOOLS:
+            return f"Error: unknown tool '{name}'"
+        try:
+            arguments = json.loads(raw_arguments or "{}")
+            return TOOLS[name](**arguments)
+        except json.JSONDecodeError:
+            return "Error: tool arguments were not valid JSON"
+        except TypeError as e:
+            return f"Error: invalid arguments for {name}: {e}"
+        except Exception as e:
+            return f"Error while running {name}: {e}"
 
     def run(self, task: str, stream_callback=None):
-        """
-        Run the agent loop until task is complete or max iterations reached.
-        stream_callback: optional function called with each step for streaming
-        """
+        def emit(event: dict):
+            if stream_callback:
+                stream_callback(event)
+
         messages = [
             {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-            {"role": "user", "content": task}
+            {"role": "user", "content": task},
         ]
-
         steps = []
 
-        for iteration in range(self.max_iterations):
-            # Call LLM
+        for _ in range(self.max_iterations):
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
-                max_tokens=1000,
-                temperature=0.1
+                tools=TOOL_SCHEMAS,
+                tool_choice="auto",
+                max_tokens=2000,
+                temperature=0.1,
             )
+            message = response.choices[0].message
 
-            agent_response = response.choices[0].message.content
-            parsed = self.parse_response(agent_response)
+            # No tool calls: the model is giving its final answer
+            if not message.tool_calls:
+                final = {"type": "final", "content": message.content or ""}
+                steps.append(final)
+                emit(final)
+                return {"success": True, "steps": steps, "answer": final["content"]}
 
-            # Stream the thought
-            if parsed["thought"] and stream_callback:
-                stream_callback({
-                    "type": "thought",
-                    "content": parsed["thought"]
-                })
+            # Any text alongside tool calls is the agent's reasoning
+            if message.content:
+                emit({"type": "thought", "content": message.content})
 
-            # If we have a final answer — we're done
-            if parsed["final_answer"]:
-                step = {
-                    "type": "final",
-                    "content": parsed["final_answer"]
-                }
-                steps.append(step)
-                if stream_callback:
-                    stream_callback(step)
-                return {
-                    "success": True,
-                    "steps": steps,
-                    "answer": parsed["final_answer"]
-                }
+            # Add the assistant's tool request to history
+            messages.append({
+                "role": "assistant",
+                "content": message.content or "",
+                "tool_calls": [
+                    {
+                        "id": call.id,
+                        "type": "function",
+                        "function": {
+                            "name": call.function.name,
+                            "arguments": call.function.arguments,
+                        },
+                    }
+                    for call in message.tool_calls
+                ],
+            })
 
-            # If we have a tool call — execute it
-            if parsed["tool"] and parsed["input"]:
-                tool_name = parsed["tool"]
-                tool_input = parsed["input"]
+            # Run each requested tool and add its result to history
+            for call in message.tool_calls:
+                name = call.function.name
+                raw_args = call.function.arguments
 
-                step = {
-                    "type": "tool_call",
-                    "tool": tool_name,
-                    "input": tool_input
-                }
-                steps.append(step)
+                call_step = {"type": "tool_call", "tool": name, "input": raw_args}
+                steps.append(call_step)
+                emit(call_step)
 
-                if stream_callback:
-                    stream_callback(step)
+                result = self.execute_tool(name, raw_args)
 
-                # Execute the tool
-                if tool_name in TOOLS:
-                    tool_result = TOOLS[tool_name](tool_input)
-                else:
-                    tool_result = f"Error: Unknown tool '{tool_name}'"
+                result_step = {"type": "tool_result", "tool": name, "result": result[:500]}
+                steps.append(result_step)
+                emit(result_step)
 
-                step_result = {
-                    "type": "tool_result",
-                    "tool": tool_name,
-                    "result": tool_result[:500]  # limit for display
-                }
-                steps.append(step_result)
-
-                if stream_callback:
-                    stream_callback(step_result)
-
-                # Add to conversation history
                 messages.append({
-                    "role": "assistant",
-                    "content": agent_response
-                })
-                messages.append({
-                    "role": "user",
-                    "content": f"Tool result for {tool_name}:\n{tool_result}"
+                    "role": "tool",
+                    "tool_call_id": call.id,
+                    "content": result,
                 })
 
-            else:
-                # No tool and no final answer — something went wrong
-                break
-
-        return {
-            "success": False,
-            "steps": steps,
-            "answer": "Agent could not complete the task within the iteration limit."
+        failure = {
+            "type": "error",
+            "content": "Agent could not complete the task within the iteration limit.",
         }
+        steps.append(failure)
+        emit(failure)
+        return {"success": False, "steps": steps, "answer": failure["content"]}
