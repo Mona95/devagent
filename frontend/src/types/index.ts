@@ -4,3 +4,7 @@ export type AgentEvent =
     | { type: 'tool_result'; tool: string; result: string }
     | { type: 'final'; content: string }
     | { type: 'error'; content: string }
+
+export type StepEvent = Extract<AgentEvent, { type: 'thought' | 'tool_call' | 'tool_result' }>
+export type FinalEvent = Extract<AgentEvent, { type: 'final' }>
+export type ErrorEvent = Extract<AgentEvent, { type: 'error' }>
