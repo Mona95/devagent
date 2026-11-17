@@ -123,10 +123,19 @@ class DevAgent:
         except Exception as e:
             return f"Error while running {name}: {e}"
 
-    def run(self, task: str, stream_callback=None):
+    def run(self, task: str, stream_callback=None, should_cancel=None):
         def emit(event: dict):
             if stream_callback:
                 stream_callback(event)
+
+        def cancelled() -> bool:
+            return bool(should_cancel and should_cancel())
+
+        cancelled_result = {
+            "success": False,
+            "steps": [],
+            "answer": "Cancelled by user.",
+        }
 
         messages = [
             {"role": "system", "content": AGENT_SYSTEM_PROMPT},
@@ -135,6 +144,10 @@ class DevAgent:
         steps = []
 
         for _ in range(self.max_iterations):
+            if cancelled():
+                print("[agent] cancelled, stopping")
+                return cancelled_result
+
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=messages,
@@ -175,6 +188,10 @@ class DevAgent:
 
             # Run each requested tool and add its result to history
             for call in message.tool_calls:
+                if cancelled():
+                    print("[agent] cancelled, stopping")
+                    return cancelled_result
+
                 name = call.function.name
                 raw_args = call.function.arguments
 

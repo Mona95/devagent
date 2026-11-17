@@ -1,10 +1,11 @@
+import asyncio
 import json
 import os
 import queue
 import threading
 
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
@@ -44,14 +45,20 @@ def health():
 
 
 @app.post("/api/run")
-def run_task(body: TaskRequest):
+@app.post("/api/run")
+async def run_task(body: TaskRequest, request: Request):
     events: queue.Queue = queue.Queue()
-    DONE = object()  # sentinel: "no more events"
+    cancel = threading.Event()
+    DONE = object()
 
     def worker():
         try:
             agent = DevAgent()
-            agent.run(body.task, stream_callback=events.put)
+            agent.run(
+                body.task,
+                stream_callback=events.put,
+                should_cancel=cancel.is_set,
+            )
         except Exception as e:
             events.put({"type": "error", "content": str(e)})
         finally:
@@ -59,12 +66,23 @@ def run_task(body: TaskRequest):
 
     threading.Thread(target=worker, daemon=True).start()
 
-    def event_stream():
-        while True:
-            event = events.get()
-            if event is DONE:
-                break
-            yield to_sse(event)
+    async def event_stream():
+        try:
+            while True:
+                try:
+                    # Wait up to 1s in a helper thread so the event loop stays free
+                    event = await asyncio.to_thread(events.get, True, 1.0)
+                except queue.Empty:
+                    # Nothing arrived: good moment to check the client is still there
+                    if await request.is_disconnected():
+                        break
+                    continue
+
+                if event is DONE:
+                    break
+                yield to_sse(event)
+        finally:
+            cancel.set()  # runs on normal finish, disconnect or error
 
     return StreamingResponse(
         event_stream(),
