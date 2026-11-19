@@ -1,3 +1,5 @@
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
 import type { Turn } from '../hooks/useAgent'
 import type { ErrorEvent, FinalEvent, StepEvent } from '../types'
 import EventStep from './EventStep'
@@ -38,11 +40,22 @@ export default function TurnView({ turn }: { turn: Turn }) {
 
             {/* Final answer */}
             {final && (
-                <div className="rounded-2xl border border-gray-800 bg-gray-900 text-gray-100 text-sm px-4 py-3 whitespace-pre-wrap">
-                    {final.content}
+                <div className="rounded-2xl border border-gray-800 bg-gray-900 px-4 py-3
+          prose prose-invert prose-sm max-w-none">
+                    <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                            a: ({ node, ...props }) => (
+                                <a {...props} target="_blank" rel="noopener noreferrer" />
+                            ),
+                        }}
+                    >
+                        {final.content}
+                    </ReactMarkdown>
                 </div>
             )}
 
+            {/* Error: unchanged, still plain text */}
             {error && (
                 <div className="rounded-lg border border-red-800 bg-red-950 text-red-300 text-sm px-4 py-3">
                     {error.content}
