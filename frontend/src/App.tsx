@@ -4,9 +4,9 @@ import TurnView from './components/TurnView'
 import TaskInput from './components/TaskInput'
 
 const EXAMPLE_TASKS = [
-    'Use Python to calculate the 20th Fibonacci number',
     'Look at the GitHub repo tiangolo/fastapi and summarize what it does',
     'Search the web for the latest stable Python version',
+    'Read https://fastapi.tiangolo.com and list its main features',
 ]
 
 export default function App() {

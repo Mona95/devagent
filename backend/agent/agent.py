@@ -4,7 +4,7 @@ import os
 from dotenv import load_dotenv
 from groq import Groq
 
-from agent.prompts import AGENT_SYSTEM_PROMPT
+from agent.prompts import build_system_prompt
 from agent.tools.analyze_code import analyze_code
 from agent.tools.github_tool import github_repo
 from agent.tools.read_url import read_url
@@ -102,6 +102,14 @@ TOOL_SCHEMAS = [
     },
 ]
 
+# Secure by default: code execution is OFF unless explicitly enabled
+ENABLE_CODE_EXECUTION = os.getenv("ENABLE_CODE_EXECUTION", "false").lower() == "true"
+
+if not ENABLE_CODE_EXECUTION:
+    TOOLS.pop("run_python", None)
+    TOOL_SCHEMAS = [s for s in TOOL_SCHEMAS if s["function"]["name"] != "run_python"]
+
+print(f"[config] code execution enabled: {ENABLE_CODE_EXECUTION}")
 
 class DevAgent:
     def __init__(self):
@@ -138,7 +146,7 @@ class DevAgent:
         }
 
         messages = [
-            {"role": "system", "content": AGENT_SYSTEM_PROMPT},
+            {"role": "system", "content": build_system_prompt(ENABLE_CODE_EXECUTION)},
             {"role": "user", "content": task},
         ]
         steps = []
